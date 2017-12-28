@@ -33,7 +33,7 @@ get_lasso_result = function(regression.data){
 
 # get regression df for each mRNA, TF included as candidate regulators
 getDF = function(regression.data, mRNA){
-  miRNA.candidates = as.character(regression.data$interactions[regression.data$interactions$mRNA == mRNA,c("miRNA")])
+  miRNA.candidates = as.character(regression.data$interactions[regression.data$interactions$target == mRNA,c("miRNA")])
   tf.mRNA.interactions = regression.data$tf.mRNA.interactions
   TF.candidates = tf.mRNA.interactions$TF[which(tf.mRNA.interactions$target == mRNA)] 
   TF.candidates = TF.candidates[TF.candidates %in% rownames(regression.data$mRNA)]
