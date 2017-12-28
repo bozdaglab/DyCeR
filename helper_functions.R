@@ -2,22 +2,18 @@
 get_lasso_result = function(regression.data){
   mRNA.targets = rownames(regression.data$mRNA)
   bt.size = ncol(regression.data$mRNA)
-
-  if(file.exists(file.path)){file.remove(file.path)}
-  if(file.exists(temp.path)){file.remove(temp.path)}
   
-  vars = c("mRNA.targets", "regression.data", "bt.size", "TF.target.pairs")
+  vars = c("mRNA.targets", "regression.data", "bt.size")
   functions = c("getDF","getLassoCoefficients")
   varlist = c(vars, functions)
   
-  cluster = parallel::makeCluster(parallel::detectCores()-1, outfile = temp.path)
+  cluster = parallel::makeCluster(parallel::detectCores()-1)
   parallel::clusterExport(cl = cluster,varlist = varlist, envir = environment())
   invisible(parallel::clusterEvalQ(cl = cluster,expr = library(glmnet)))
   
   lasso.list = pbapply::pblapply(cl = cluster, X = 1:length(mRNA.targets), FUN = function(mRNA.index){
     mRNA = mRNA.targets[mRNA.index]
     bt.selected.coefs = lapply(1:100, function(bt.iter){
-      # regression.df = getRegressionDF(regression.data = regression.data, mRNA = mRNA)
       regression.df = getDF(regression.data = regression.data, mRNA = mRNA)
       bt.regression.df = regression.df[sample(rownames(regression.df), size = bt.size, replace = T),]
       nonzero.lasso.coefs = getLassoCoefficients(regression.df = bt.regression.df)
@@ -27,15 +23,17 @@ get_lasso_result = function(regression.data){
   
   names(lasso.list) = mRNA.targets
   stopCluster(cluster); gc()
-
+  
+  lasso.list = get_list_of_lasso_dt(lasso.list)
   return(lasso.list)
 }
 
 # get regression df for each mRNA, TF included as candidate regulators
 getDF = function(regression.data, mRNA){
-  miRNA.candidates = as.character(regression.data$interactions[regression.data$interactions$target == mRNA,c("miRNA")])
-  tf.mRNA.interactions = regression.data$tf.mRNA.interactions
-  TF.candidates = tf.mRNA.interactions$TF[which(tf.mRNA.interactions$target == mRNA)] 
+  miRNA.target.interactions = regression.data$miRNA.target.interactions
+  miRNA.candidates = as.character(miRNA.target.interactions[miRNA.target.interactions$target == mRNA,c("miRNA")])
+  tf.target.interactions = regression.data$tf.target.interactions
+  TF.candidates = tf.target.interactions$tf[which(tf.target.interactions$target == mRNA)] 
   TF.candidates = TF.candidates[TF.candidates %in% rownames(regression.data$mRNA)]
   
   rna.expression.vector = regression.data$mRNA[mRNA,]
@@ -52,68 +50,67 @@ getDF = function(regression.data, mRNA){
   return(regression.df)
 }
 
+
 # Input: nested list of lasso-selected predictors for each DE mRNA
 # Output: number of times a predictor is selected for each DE mRNA
 get_list_of_lasso_dt = function(lasso.list){
-  cluster = parallel::makeCluster(detectCores()-1)
-  varlist = c("lasso.list")
-  parallel::clusterExport(cl = cluster, varlist = varlist, envir = environment())
-  invisible(parallel::clusterEvalQ(cl = cluster,expr = library(data.table)))
-  # convert make each element in the list to be a data table
-  lasso.dt.list = pbapply::pbsapply(cl = cluster, X = lasso.list, FUN = function(binders){
-    predictors = unlist(binders)
-    print(length(predictors))
-    if (length(predictors) == 0) return(NULL)
-    predictor.name = names(predictors)
-    predictor.coef = unname(predictors)
-    df = data.frame(name = predictor.name, coef = predictor.coef)
-    dt = as.data.table(df)
-    dt = dt[, .(count = .N, avg.coef = mean(coef)), by = .(name)]
-    dt = dt[order(count,decreasing = T)]
-    return(dt)
+  lasso.dt.list = lapply(lasso.list, function(predictors){
+    sort(table(unlist(sapply(predictors, function(binders) names(binders)))),decreasing = T)
   })
-  stopCluster(cluster)
-  lasso.dt.list = lasso.dt.list[-which(sapply(lasso.dt.list, function(predictors){return(is.null(predictors))}))]
+  no.predictor.indices = which(sapply(lasso.dt.list, function(predictors){return(is.null(predictors))}))
+  if (length(no.predictor.indices) > 0){
+    lasso.dt.list = lasso.dt.list[-no.predictor.indices]
+  }
   return(lasso.dt.list)
 }
 
 # Input: number of times a predictor is selected for each DE mRNA
 # Output: a predictor is kept if it is selected more than user-given threshold (default 70)
-get_frequently_selected_predictors = function(lasso.dt.list,threshold){
-  cluster = parallel::makeCluster(detectCores()-1)
-  parallel::clusterExport(cl = cluster,varlist = c("lasso.dt.list","threshold"),envir = environment())
-  invisible(parallel::clusterEvalQ(cl = cluster,expr = library(data.table)))
-  
-  lasso.frequent.predictors = pbapply::pblapply(cl = cluster, X = lasso.dt.list, FUN = function(dt){
-    dt = dt[which(dt$count>=threshold)]
-    if(nrow(dt)==0) {return(NULL)}
-    else {return(dt)}
+get_frequently_selected_predictors = function(lasso.list,threshold){
+  selected.predictors = lapply(lasso.list, function(predictors){
+    kept = which(predictors > threshold)
+    if (length(kept) == 0){
+      return(NULL)
+    }else{
+      return(names(predictors)[kept])
+    }
   })
-  stopCluster(cluster)
-  unkept.predictor.indicies = which(sapply(lasso.frequent.predictors, function(predictors){ is.null(predictors) }))
-  if (length(unkept.predictor.indicies) > 0){
-    lasso.frequent.predictors = lasso.frequent.predictors[-unkept.predictor.indicies] 
+  no.predictor.indices = which(sapply(selected.predictors, function(predictors){return(is.null(predictors))}))
+  if (length(no.predictor.indices) > 0){
+    selected.predictors = selected.predictors[-no.predictor.indices]
   }
-  return(lasso.frequent.predictors)
+  return(selected.predictors)
 }
 
 get_miRNA_mRNA_multiple_regression = function(regression.data, frequent.predictor.list){
   cluster = makeCluster(detectCores()-1)
-  varlist = c("regression.data","frequent.predictor.list","getRegressionDF","getOLSResultList")
+  varlist = c("regression.data","frequent.predictor.list","getOLSResultList")
   parallel::clusterExport(cl = cluster,varlist = varlist, envir = environment())
   invisible(parallel::clusterEvalQ(cl = cluster,expr = library(data.table)))
   mRNA.names = names(frequent.predictor.list)
-  lasso.list = pbapply::pblapply(cl = cluster, X = 1:length(frequent.predictor.list), function(index){
+  mRNA.miRNA.list = pbapply::pblapply(X = 1:length(frequent.predictor.list), function(index){
     selected.mRNA = names(frequent.predictor.list[index])
-    predictors = as.character(frequent.predictor.list[[index]]$name)
-    normal.result = getOLSResultList(original.regression.df = getRegressionDF(regression.data,selected.mRNA),
-                                     mRNA.target = selected.mRNA, predictors = predictors)
-  }); stopCluster(cluster)
-  names(lasso.list) = mRNA.names
+    predictors = as.character(frequent.predictor.list[[index]])
+    original.regression.df = getDF(regression.data = regression.data,mRNA = selected.mRNA)
+    normal.result = getOLSResultList(original.regression.df = original.regression.df,
+                                     mRNA.target = selected.mRNA, 
+                                     predictors = predictors)
+  })
+  names(mRNA.miRNA.list) = mRNA.names
+  stopCluster(cluster)
   
-  lasso.list = final.lasso.list[-which(sapply(final.lasso.list, function(item) (is.null(item))))]
-  lasso.list = final.lasso.list[sort(names(final.lasso.list))]
-  return(lasso.list)
+  names(lasso.list) = mRNA.names
+  no.predictor.indices = which(sapply(mRNA.miRNA.list, function(item) (is.null(item))))
+  if (length(no.predictor.indices) > 0){
+    mRNA.miRNA.list = mRNA.miRNA.list[-no.predictor.indices]
+  }
+  if (length(mRNA.miRNA.list) > 0){
+    mRNA.miRNA.list = mRNA.miRNA.list[sort(names(mRNA.miRNA.list))]  
+    return(mRNA.miRNA.list)
+  }else{
+    cat("No miRNA regulator found for any mRNA")
+    return(NULL)
+  }
 }
 
 getOLSResultList = function(original.regression.df, mRNA.target, predictors){
@@ -155,6 +152,13 @@ getOLSResultList = function(original.regression.df, mRNA.target, predictors){
 create_pair_dt = function(mRNA.miRNA.list){
   pair.dt = as.data.table(t(combn(names(mRNA.miRNA.list),2)))
   colnames(pair.dt) = c("RNAi", "RNAj"); setkeyv(pair.dt, c("RNAi","RNAj"))
+  pair.dt$num.common.miRNAs = apply(pair.dt, 1, function(pair){
+    RNAi = pair[1]
+    RNAj = pair[2]
+    num.common.miRs = length(intersect(mRNA.miRNA.list[[RNAi]],mRNA.miRNA.list[[RNAj]]))
+    return(num.common.miRs)
+  })
+  pair.dt = pair.dt[pair.dt$num.common.miRNAs>0]
   return(pair.dt)
 }
 
@@ -227,7 +231,7 @@ get_hypergeometric_pvalue = function(pair.dt, mRNA.miRNA.list){
     miRs.RNAj = mRNA.miRNA.list[[RNAj]]
     success.pop.size = length(miRs.RNAi)
     sample.size = length(miRs.RNAj)
-    success.sample.size = pair.dt$num.common.miRs[index]
+    success.sample.size = pair.dt$num.common.miRNAs[index]
     getPvalueHypergeometric(pop.size = pop.size, success.pop.size = success.pop.size,
                             sample.size = sample.size, success.sample.size = success.sample.size)
   })
@@ -236,15 +240,15 @@ get_hypergeometric_pvalue = function(pair.dt, mRNA.miRNA.list){
 
 # Input: table of mRNA pairs such that the mRNAs in a pair share at least one miRNA
 # Output: compute emperical p-value for each mRNA pair's sensitivity correlation
-get_empirical_pvalue_sensitivity_correlation = function(pair.dt, mRNA.miRNA.list, mRNA.expression, miRNA.expression){
-  permutated.sensitivity.cor.list = pbapply::pblapply(cl = cluster, X = 1:nrow(pair.dt), FUN = function(row.index){
+get_empirical_pvalue_sensitivity_correlation = function(pair.dt, mRNA.miRNA.list, mRNA, miRNA){
+  permutated.sensitivity.cor.list = pbapply::pblapply(X = 1:nrow(pair.dt), FUN = function(row.index){
     RNAi = pair.dt$RNAi[row.index];  RNAj = pair.dt$RNAj[row.index]
-    common.miRs = intersect(mRNA.miRNA.list[[RNAi]], mRNA.miRNA.list[[RNAj]])
     
     ceRNA.sensitivity.permuted = sapply(1:1000, function(bootstrap_iter){
       data.expression = getDataWithResampledMiRNAs(RNAi = RNAi, RNAj = RNAj,
-                                                   all.miRs = all.miRs, common.miRs = common.miRs,
-                                                   mRNA.regression.df =  mRNA.expression, miRNA.regression.df = miRNA.expression)
+                                                   num.common.miRNAs = pair.dt$num.common.miRNAs[row.index],
+                                                   mRNA.regression.df =  mRNA, 
+                                                   miRNA.regression.df = miRNA)
       # compute permutated correlation
       ceRNA.cor = as.numeric(WGCNA::corFast(data.expression[,1], data.expression[,2]))
       ceRNA.partial.cor = ci.test(x = colnames(data.expression)[1],
@@ -269,11 +273,11 @@ getPvalueHypergeometric = function(pop.size, success.pop.size, sample.size, succ
 }
 
 # get expression data by resampling miRNAs without replacement
-getDataWithResampledMiRNAs = function(RNAi, RNAj, all.miRs, common.miRs, mRNA.regression.df, miRNA.regression.df){
-  RNAi.expression = as.matrix(mRNA.regression.df[RNAi,]); colnames(RNAi.expression) = RNAi
-  RNAj.expression = as.matrix(mRNA.regression.df[RNAj,]); colnames(RNAj.expression) = RNAj
+getDataWithResampledMiRNAs = function(RNAi, RNAj, num.common.miRNAs, mRNA, miRNA){
+  RNAi.expression = t(as.matrix(mRNA[RNAi,])); colnames(RNAi.expression) = RNAi
+  RNAj.expression = t(as.matrix(mRNA[RNAj,])); colnames(RNAj.expression) = RNAj
   # construct data expression
-  random.miRs = sample(all.miRs, size = length(common.miRs), replace = F)
+  random.miRs = sample(rownames(miRNA), size = num.common.miRNAs, replace = F)
   permutated.miRs.expression = as.matrix(miRNA.regression.df[random.miRs, ])
   if (length(random.miRs) == 1){
     rownames(permutated.miRs.expression) = random.miRs
@@ -281,6 +285,20 @@ getDataWithResampledMiRNAs = function(RNAi, RNAj, all.miRs, common.miRs, mRNA.re
   permutated.miRs.expression = t(miRNA.regression.df[random.miRs,])
   data.expression = as.data.frame(scale(cbind(RNAi.expression, RNAj.expression, permutated.miRs.expression)))
   return(data.expression)
+}
+
+
+getLassoCoefficients = function(regression.df){
+  x = model.matrix(mRNA~.,regression.df)[,-1]; y=regression.df$mRNA
+  # perform Lasso
+  cv.out= cv.glmnet(x,y,alpha=1,nfolds = 10)
+  coefs = coef.cv.glmnet(cv.out,s = cv.out$lambda.1se)[-1,]
+  selected.coefs = coefs[coefs !=0]
+  if (length(selected.coefs) == 0){
+    return(NULL)
+  }
+  names(selected.coefs) = gsub(names(selected.coefs),pattern="`",replacement="")
+  return(selected.coefs)
 }
 
 
