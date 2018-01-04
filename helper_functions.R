@@ -301,5 +301,10 @@ getLassoCoefficients = function(regression.df){
   return(selected.coefs)
 }
 
+regulator_gene_stat = function(dat){
+  cat("Number of interactions: ", nrow(dat), "\n")
+  cat("Number of regulators: ", length(unique(dat$regulator)), "\n")
+  cat("Number of target: ", length(unique(dat$target)), "\n")
+}
 
 
